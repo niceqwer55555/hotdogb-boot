@@ -32,7 +32,9 @@ Windows / Git Bash 会走 `skip` 分支，不会把小写文件覆盖掉；WSL /
 **因此本仓库必须经 `scripts/build.sh` 或 `scripts/build-kernel.sh` 编译**，
 直接 `make -C kernel` 会因为缺这些文件而失败。
 
-## 文件清单（10 个）
+## 文件清单（12 个）
+
+即原始源码树里全部「仅靠大小写区分」的 12 组文件对中的大写原件。
 
 | 还原到 `kernel/` 的路径 | 本地已有的小写孪生文件 | 用途 |
 |---|---|---|
@@ -43,6 +45,8 @@ Windows / Git Bash 会走 `skip` 分支，不会把小写文件覆盖掉；WSL /
 | `include/uapi/linux/netfilter/xt_DSCP.h` | `xt_dscp.h` | 上述 target 的 uAPI 头 |
 | `include/uapi/linux/netfilter/xt_RATEEST.h` | `xt_rateest.h` | 同上 |
 | `include/uapi/linux/netfilter/xt_TCPMSS.h` | `xt_tcpmss.h` | 同上 |
+| `include/uapi/linux/netfilter/xt_CONNMARK.h` | `xt_connmark.h` | uAPI 头，内核 `.c` 未直接 include（编译不依赖，但属原始源码） |
+| `include/uapi/linux/netfilter/xt_MARK.h` | `xt_mark.h` | 同上 |
 | `include/uapi/linux/netfilter_ipv4/ipt_ECN.h` | `ipt_ecn.h` | `ipt_ECN.c` 引用 |
 | `include/uapi/linux/netfilter_ipv4/ipt_TTL.h` | `ipt_ttl.h` | `xt_HL.c` 引用 |
 | `include/uapi/linux/netfilter_ipv6/ip6t_HL.h` | `ip6t_hl.h` | `xt_HL.c` 引用 |
@@ -53,6 +57,10 @@ Windows / Git Bash 会走 `skip` 分支，不会把小写文件覆盖掉；WSL /
 （sm8150 / Linux 4.14），按上述路径逐个取原文，未做任何代码修改。
 其中 `xt_RATEEST.c` 与上游 `torvalds/linux v4.14` 有差异（LineageOS 有下游补丁），
 故统一采用 LineageOS 版本。
+
+**逐字节校验**：用打包前的原始 7z 源码快照（在大小写敏感环境生成，76,790 个文件，
+附全量 `SHA256SUMS.txt`）比对，本目录 12 个文件的 sha256 与快照记录**全部一致**。
+这同时证明快照里确实有 12 组仅大小写不同的文件对，且没有遗漏。
 
 ## 自检
 
@@ -73,4 +81,20 @@ for dp,dn,fns in os.walk('kernel'):
 PY
 ```
 
-该自检应为 0 条（当前内核树里 4 对冲突均已由本目录覆盖）。
+该自检应为 0 条（当前内核树里 4 处 Makefile 冲突均已由本目录覆盖）。
+注意它只能查出「Makefile 引用了 `X.o` 却没有 `X.c`」的情况，查不出纯头文件冲突
+（`xt_CONNMARK.h` / `xt_MARK.h`）；要完整核对须用大小写敏感环境下的原始快照。
+
+## 已知遗留：`AUX` 是 Windows 保留设备名
+
+除大小写外，Windows 还不允许创建名为 `aux.*` 的文件，因此原始快照里这 3 个文件
+在 Windows 侧被改名加了下划线前缀：
+
+- `kernel/drivers/gpu/drm/nouveau/nvkm/subdev/i2c/aux.c` → `_aux.c`
+- `kernel/drivers/gpu/drm/nouveau/nvkm/subdev/i2c/aux.h` → `_aux.h`
+- `kernel/include/soc/arc/aux.h` → `_aux.h`
+
+`nouveau/.../i2c/Kbuild` 仍写着 `nvkm-y += nvkm/subdev/i2c/aux.o`，但 clean 档的
+`CONFIG_DRM_NOUVEAU is not set`、arc 头也只在 ARC 架构使用，所以当前编译不受影响。
+将来若启用 nouveau 或编译 ARC，需要在 Linux 还原阶段把 `_aux.*` 重命名回 `aux.*`；
+本目录暂不覆盖这一项。

@@ -35,6 +35,9 @@ case "$(uname -s)" in
     if [[ -d "$CASEFIX" ]]; then
       while IFS= read -r -d '' src; do
         rel="${src#$CASEFIX/}"
+        case "$rel" in
+          *.md) continue ;;   # README 等说明文档不是源码，别复制成 kernel/README.md
+        esac
         dst="$K/$rel"
         if [[ ! -e "$dst" ]]; then
           mkdir -p "$(dirname "$dst")"
