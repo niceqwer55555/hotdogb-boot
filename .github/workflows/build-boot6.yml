@@ -1,0 +1,213 @@
+name: Build hotdogb boot6.img
+
+# 只编译内核 + 重打包 boot 分区，不做全量 ROM 编译。
+# 产物：dist/boot-<profile>.img（96 MiB，可直接 fastboot flash boot）
+# 编译成功后自动按北京时间打 Tag（如 v20261116-085012-clean），
+# 并把 boot.img、校验文件、完整离线源码包（含 kernel/ 与整个 toolchain/）一起上传到 Release。
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: '内核配置档位'
+        required: true
+        default: 'clean'
+        type: choice
+        options: [clean, stock, custom]
+      jobs:
+        description: '编译并发数（4 核 runner 建议 4~6）'
+        required: true
+        default: '4'
+      kernel_src_release:
+        description: '轻量仓库模式：填写 Release tag，从该 Release 下载 kernel-src.7z.* 分卷。留空则用仓库内 kernel/'
+        required: false
+        default: ''
+      use_system_host_tools:
+        description: '使用系统 make/flex/bison（在线 build-tools 下载失败时勾选）'
+        type: boolean
+        default: false
+  push:
+    branches: [main, master]
+    paths-ignore: ['**.md', 'docs/**']
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          lfs: false
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential make flex bison m4 perl python3 \
+            libncurses5 libtinfo5 libxml2 libzstd1 libssl-dev \
+            bc cpio curl ca-certificates p7zip-full file
+
+      - name: 轻量仓库模式（可选）——从 Release 下载内核源码分卷
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_src_release != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/ksrc
+          gh release download "${{ inputs.kernel_src_release }}" -p 'kernel-src.7z.*' -D /tmp/ksrc
+          ls -lh /tmp/ksrc
+          rm -rf kernel && mkdir -p kernel
+          7z x -mmt=2 -y /tmp/ksrc/kernel-src.7z.001 -okernel
+          test -d kernel/arch/arm64 || { echo "内核源码解压失败"; exit 1; }
+          echo "内核源码就绪: $(find kernel -type f | wc -l) 文件"
+
+      - name: 恢复工具链缓存
+        uses: actions/cache@v4
+        with:
+          path: toolchain
+          key: hotdogb-toolchain-${{ hashFiles('config/build.env') }}-v1
+
+      - name: 编译内核并生成 boot.img
+        env:
+          PROFILE: ${{ inputs.profile || 'clean' }}
+          JOBS: ${{ inputs.jobs || '4' }}
+          USE_SYSTEM_HOST_TOOLS: ${{ inputs.use_system_host_tools && '1' || '0' }}
+          CLANG_ARCHIVE_URL: ${{ vars.CLANG_ARCHIVE_URL }}
+          GCC64_URL: ${{ vars.GCC64_URL }}
+          GCC32_URL: ${{ vars.GCC32_URL }}
+          BUILDTOOLS_URL: ${{ vars.BUILDTOOLS_URL }}
+        run: |
+          chmod +x scripts/*.sh tools/*.py
+          ./scripts/build.sh --profile "$PROFILE" --jobs "$JOBS"
+
+      # 先生成时间戳和 Tag 名，后续步骤复用，保证源码包与 Tag 时间一致
+      - name: 计算北京时间 Tag 名
+        if: github.event_name != 'pull_request'
+        id: taginfo
+        run: |
+          set -euo pipefail
+          PROFILE="${{ inputs.profile || 'clean' }}"
+          TS="$(TZ='Asia/Shanghai' date +'%Y%m%d-%H%M%S')"
+          TAG="v${TS}-${PROFILE}"
+          echo "TS=$TS"   >> "$GITHUB_OUTPUT"
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "PROFILE=$PROFILE" >> "$GITHUB_OUTPUT"
+          echo "将创建 Tag: $TAG"
+
+      # 打包完整离线源码：包含 Git 跟踪文件 + 完整 kernel/ + 完整 toolchain/（含 .ready 与 dl/）
+      - name: 打包离线源码（含 kernel 与完整 toolchain）
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          TS="${{ steps.taginfo.outputs.TS }}"
+          PROFILE="${{ steps.taginfo.outputs.PROFILE }}"
+          SRC_DIR="hotdogb-boot-src-${TS}-${PROFILE}"
+          SRC_NAME="${SRC_DIR}.tar.gz"
+          mkdir -p dist
+
+          # 前置检查：离线编译依赖 toolchain/.ready
+          if [ ! -f toolchain/.ready ]; then
+            echo "错误：toolchain/.ready 不存在，打包出来的源码包无法离线编译" >&2
+            exit 1
+          fi
+
+          rm -rf "/tmp/${SRC_DIR}"
+          mkdir -p "/tmp/${SRC_DIR}"
+
+          # 1) 仓库内被 Git 跟踪的文件（不含 .git、out/、dist/、toolchain/）
+          git archive --format=tar HEAD | tar -x -C "/tmp/${SRC_DIR}"
+
+          # 2) 内核源码（轻量模式下 kernel/ 不在 Git 里，必须显式拷入）
+          if [ -d kernel ]; then
+            rm -rf "/tmp/${SRC_DIR}/kernel"
+            cp -a kernel "/tmp/${SRC_DIR}/kernel"
+          fi
+
+          # 3) 完整工具链（含 .ready 和 dl/ 缓存，原样打包）
+          if [ -d toolchain ]; then
+            rm -rf "/tmp/${SRC_DIR}/toolchain"
+            cp -a toolchain "/tmp/${SRC_DIR}/toolchain"
+          fi
+
+          # 4) 拷贝离线编译说明（仓库根目录静态文件，避免工作流内联 heredoc 导致 YAML 解析报错）
+          if [ -f OFFLINE-BUILD.md ]; then
+            cp OFFLINE-BUILD.md "/tmp/${SRC_DIR}/OFFLINE-BUILD.md"
+          else
+            echo "警告：仓库根目录未找到 OFFLINE-BUILD.md，源码包中将不含离线说明" >&2
+          fi
+
+          # 5) 打包（完整 toolchain，不排除任何内容）
+          tar -C /tmp -czf "dist/${SRC_NAME}" "${SRC_DIR}"
+          ls -lh "dist/${SRC_NAME}"
+
+          # 6) 生成校验
+          ( cd dist && sha256sum "${SRC_NAME}" > "${SRC_NAME}.sha256" )
+
+      - name: 上传产物到 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotdogb-boot-${{ inputs.profile || 'clean' }}
+          path: |
+            dist/*.img
+            dist/*.sha256
+            dist/*.tar.gz
+            dist/verify-*.json
+            out/arch/arm64/boot/Image-dtb
+            out/.config
+            build-kernel.log
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 创建北京时间 Tag
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.taginfo.outputs.TAG }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: 上传产物和离线源码到 Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.taginfo.outputs.TAG }}
+          name: ${{ steps.taginfo.outputs.TAG }}
+          files: |
+            dist/*.img
+            dist/*.sha256
+            dist/*.tar.gz
+            dist/verify-*.json
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+      - name: 失败诊断（打印编译错误行）
+        if: failure()
+        run: |
+          if [ -f build-kernel.log ]; then
+            {
+              echo '### 编译错误摘要'
+              echo '```'
+              grep -nE 'make\[[0-9]+\]: \*\*\*|^make: \*\*\*|error:|No rule to make target|fatal error|Permission denied|undefined reference|Killed' build-kernel.log | tail -40
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+      - name: 失败时上传完整构建日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-kernel-log-${{ github.run_id }}
+          path: build-kernel.log
+          if-no-files-found: warn
+          retention-days: 14
