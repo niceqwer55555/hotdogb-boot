@@ -16,6 +16,20 @@
 
 #include "dp_panel.h"
 #include <drm/drm_fixed.h>
+#include <linux/module.h>
+
+/*
+ * hotdogb / HUAWEI VR Glass: keep every lane advertised by the sink even
+ * when the Type-C PD stack reports a multi-function (USB3 + DP) alt mode.
+ * The SM8150 combo PHY is already switched to DP-only mode by
+ * dp_catalog_ctrl_usb_reset(), so clamping to 2 lanes only throws away
+ * bandwidth: 3200x1600@70 was being pushed from 24bpp down to 18bpp.
+ * Set to 0 to restore the stock 2-lane behaviour without rebuilding.
+ */
+bool dp_force_4lanes = true;
+module_param(dp_force_4lanes, bool, 0644);
+MODULE_PARM_DESC(dp_force_4lanes,
+	"Use all lanes advertised by the sink in multi-function DP mode");
 
 #define DP_KHZ_TO_HZ 1000
 #define DP_PANEL_DEFAULT_BPP 24
@@ -1656,12 +1670,13 @@ skip_dpcd_read:
 
 	link_info->num_lanes = dpcd[DP_MAX_LANE_COUNT] &
 				DP_MAX_LANE_COUNT_MASK;
-	if (multi_func)
+	if (multi_func && !dp_force_4lanes)
 		link_info->num_lanes = min_t(unsigned int,
 			link_info->num_lanes, 2);
 
-	pr_debug("version:%d.%d, rate:%d, lanes:%d\n", panel->major,
-		panel->minor, link_info->rate, link_info->num_lanes);
+	pr_debug("version:%d.%d, rate:%d, lanes:%d (multi_func=%d, clamp=%d)\n",
+		panel->major, panel->minor, link_info->rate,
+		link_info->num_lanes, multi_func, !dp_force_4lanes);
 
 	if (drm_dp_enhanced_frame_cap(dpcd))
 		link_info->capabilities |= DP_LINK_CAP_ENHANCED_FRAMING;

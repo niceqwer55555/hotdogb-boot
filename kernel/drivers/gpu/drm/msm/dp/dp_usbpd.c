@@ -20,6 +20,9 @@
 
 #include "dp_usbpd.h"
 
+/* Defined in dp_panel.c; hotdogb 4-lane override (dp_force_4lanes). */
+extern bool dp_force_4lanes;
+
 /* DP specific VDM commands */
 #define DP_USBPD_VDM_STATUS	0x10
 #define DP_USBPD_VDM_CONFIGURE	0x11
@@ -183,13 +186,23 @@ static u32 dp_usbpd_gen_config_pkt(struct dp_usbpd_private *pd)
 	else
 		pin_cfg = pd->cap.dlink_pin_config;
 
-	for (pin = DP_USBPD_PIN_A; pin < DP_USBPD_PIN_MAX; pin++) {
-		if (pin_cfg & BIT(pin)) {
-			if (pd->dp_usbpd.base.multi_func) {
-				if (pin == DP_USBPD_PIN_D)
+	/*
+	 * hotdogb: the glasses advertise 4 DP lanes (DPCD 0x002 = 0xc4).
+	 * Prefer pin assignment D (4 DP lanes + USB2) over the multi-function
+	 * C (2 DP lanes + USB3) when the partner supports it, otherwise keep
+	 * the stock selection so this stays safe for other cables.
+	 */
+	if (dp_force_4lanes && (pin_cfg & BIT(DP_USBPD_PIN_D))) {
+		pin = DP_USBPD_PIN_D;
+	} else {
+		for (pin = DP_USBPD_PIN_A; pin < DP_USBPD_PIN_MAX; pin++) {
+			if (pin_cfg & BIT(pin)) {
+				if (pd->dp_usbpd.base.multi_func) {
+					if (pin == DP_USBPD_PIN_D)
+						break;
+				} else {
 					break;
-			} else {
-				break;
+				}
 			}
 		}
 	}

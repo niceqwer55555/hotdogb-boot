@@ -6,6 +6,7 @@
 | 文件 | 说明 |
 |---|---|
 | `kernel-custom.patch` | `git diff` 快照，2 个文件 / +121 −1 行 |
+| `dp-4lane.patch` | Type-C DP 强制 4 lane，2 个文件 / +37 −9 行 |
 
 ## 改动内容
 
@@ -19,6 +20,22 @@
 2. **`scripts/mkcompile_h`**（1 行）
    - 用 `head -n1` 取编译环境版本号，避免本机 CUDA/nvcc 版本字符串污染内核 version magic
    - 纯构建环境修复，不改变运行时行为，三档配置都保留
+
+## DP 4 lane（华为 VR Glass）
+
+`kernel/` 已直接改好，正常编译无需再打补丁。要点：
+
+- `dp_panel.c`：不再因为 PD 报告 `multi_func` 就把 sink 报告的 4 lane 砍到 2 lane。
+  眼镜的 DPCD 是 `14 14 c4 …`（DP 1.4 / HBR2 / **4 lane**），原来 2 lane HBR2
+  只有 8.64 Gbps，`3200×1600@70` 的 24bpp 需要 9.89 Gbps，于是驱动把 bpp
+  主动降到 18（RGB 6bpc）。4 lane 后 17.28 Gbps，24bpp/90Hz 都放得下。
+- `dp_usbpd.c`：优先申请 Type-C 引脚分配 D（4×DP + USB2），仅当对端能力
+  VDO 里确实有 D 位时才切；否则保持原逻辑，其他线缆不受影响。
+- 运行时开关：`/sys/module/msm_drm/parameters/dp_force_4lanes`（写入 `0` 即恢复
+  原来的 2 lane 行为，不用重新编译）。
+
+风险提示：4 lane 会占用原本给 USB3 的 SuperSpeed 对，USB3 不可用；眼镜的
+HID/6DoF 走 USB2，理论上不受影响。若换线后出现训练失败，先写 `0` 回退。
 
 ## 三档 defconfig 的关系
 
